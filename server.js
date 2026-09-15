@@ -1,30 +1,27 @@
-const express=require('express'), multer=require('multer'), fs=require('fs'), path=require('path');
+const express=require('express'), multer=require('multer'), fs=require('fs'), path=require('path'), crypto=require('crypto');
 const app=express(), PORT=process.env.PORT||8080;
-const DATA=path.join(__dirname,'data','orders.json');
-const UP=path.join(__dirname,'uploads');
+const DATA=path.join(__dirname,'data','orders.json'), USERS=path.join(__dirname,'data','users.json'), UP=path.join(__dirname,'uploads');
 fs.mkdirSync(path.dirname(DATA),{recursive:true}); fs.mkdirSync(UP,{recursive:true});
-if(!fs.existsSync(DATA)) fs.writeFileSync(DATA,'[]');
+if(!fs.existsSync(DATA))fs.writeFileSync(DATA,'[]');
+const hash=x=>crypto.createHash('sha256').update(String(x)).digest('hex');
+if(!fs.existsSync(USERS))fs.writeFileSync(USERS,JSON.stringify([{id:1,username:'admin',password:hash('IranBoard1405!'),role:'superadmin',name:'مدیر کل'}],null,2));
+const sessions=new Map();
 const upload=multer({dest:UP,limits:{fileSize:40*1024*1024,files:30}});
-app.use(express.json({limit:'2mb'})); app.use(express.urlencoded({extended:true}));
-app.use(express.static(path.join(__dirname,'public')));
-const read=()=>{try{return JSON.parse(fs.readFileSync(DATA,'utf8'))}catch(e){return []}};
-const write=x=>fs.writeFileSync(DATA,JSON.stringify(x,null,2));
+app.use(express.json({limit:'2mb'})); app.use(express.urlencoded({extended:true})); app.use(express.static(path.join(__dirname,'public')));
+const read=(f)=>{try{return JSON.parse(fs.readFileSync(f,'utf8'))}catch(e){return []}}, write=(f,x)=>fs.writeFileSync(f,JSON.stringify(x,null,2));
 const code=()=>`IB-${new Date().toISOString().slice(2,10).replaceAll('-','')}-${Math.floor(1000+Math.random()*9000)}`;
-app.post('/api/orders',upload.fields([{name:'altiumFiles',maxCount:15},{name:'imageFiles',maxCount:15}]),(req,res)=>{
-  const a=read(), tracking=code(), f=req.files||{};
-  const files=[...(f.altiumFiles||[]).map(x=>({name:x.originalname,file:x.filename,type:'altium'})),
-               ...(f.imageFiles||[]).map(x=>({name:x.originalname,file:x.filename,type:'image'}))];
-  const o={id:Date.now(),tracking,createdAt:new Date().toISOString(),status:'در انتظار بررسی',
-    customer:{name:req.body.name||'',company:req.body.company||'',phone:req.body.phone||'',email:req.body.email||''},
-    project:{title:req.body.title||'',quantity:req.body.quantity||'',layers:req.body.layers||'',material:req.body.material||'FR-4',
-      thickness:req.body.thickness||'',copper:req.body.copper||'',finish:req.body.finish||'',notes:req.body.notes||''},
-    files,messages:[],price:null,proforma:null};
-  a.unshift(o); write(a); res.json({ok:true,tracking,order:o});
-});
-app.get('/api/track/:code',(req,res)=>{const o=read().find(x=>x.tracking.toLowerCase()===req.params.code.toLowerCase()); if(!o)return res.sendStatus(404);res.json({order:o})});
-app.get('/api/admin/orders',(req,res)=>res.json(read()));
-app.patch('/api/admin/orders/:id',(req,res)=>{let a=read(),o=a.find(x=>String(x.id)===req.params.id);if(!o)return res.sendStatus(404);Object.assign(o,req.body);write(a);res.json({ok:true,order:o})});
-app.post('/api/admin/orders/:id/message',(req,res)=>{let a=read(),o=a.find(x=>String(x.id)===req.params.id);if(!o)return res.sendStatus(404);let text=(req.body.text||'').trim();if(!text)return res.status(400).json({ok:false});o.messages=o.messages||[];o.messages.push({from:'admin',text,at:new Date().toISOString()});if(req.body.status)o.status=req.body.status;write(a);res.json({ok:true,order:o})});
-app.post('/api/orders/:code/reply',upload.fields([{name:'extraFiles',maxCount:10}]),(req,res)=>{let a=read(),o=a.find(x=>x.tracking.toLowerCase()===req.params.code.toLowerCase());if(!o)return res.sendStatus(404);let text=(req.body.text||'').trim();o.messages=o.messages||[];if(text)o.messages.push({from:'customer',text,at:new Date().toISOString()});o.files=o.files||[];((req.files&&req.files.extraFiles)||[]).forEach(x=>o.files.push({name:x.originalname,file:x.filename,type:'extra'}));if(text||((req.files&&req.files.extraFiles)||[]).length)o.status='اطلاعات تکمیلی دریافت شد';write(a);res.json({ok:true})});
-app.get('/api/admin/agent',(req,res)=>{const a=read();res.json({total:a.length,new:a.filter(x=>x.status==='در انتظار بررسی').length,need:a.filter(x=>x.status.includes('تکمیل')).length,priced:a.filter(x=>x.price).length})});
-app.listen(PORT,'0.0.0.0',()=>console.log('IranBoard V3 running on',PORT));
+const auth=(req,res,next)=>{let t=(req.headers.authorization||'').replace('Bearer ','');let s=sessions.get(t);if(!s)return res.status(401).json({ok:false,error:'unauthorized'});req.user=s;next()};
+const superOnly=(req,res,next)=>req.user.role==='superadmin'?next():res.status(403).json({ok:false,error:'forbidden'});
+app.post('/api/login',(req,res)=>{let u=read(USERS).find(x=>x.username===req.body.username&&x.password===hash(req.body.password));if(!u)return res.status(401).json({ok:false});let token=crypto.randomBytes(24).toString('hex');sessions.set(token,{id:u.id,username:u.username,role:u.role,name:u.name});res.json({ok:true,token,user:{username:u.username,role:u.role,name:u.name}})});
+app.get('/api/me',auth,(req,res)=>res.json({ok:true,user:req.user}));
+app.post('/api/logout',auth,(req,res)=>{let t=(req.headers.authorization||'').replace('Bearer ','');sessions.delete(t);res.json({ok:true})});
+app.get('/api/admin/users',auth,superOnly,(req,res)=>res.json(read(USERS).map(({password,...u})=>u)));
+app.post('/api/admin/users',auth,superOnly,(req,res)=>{let a=read(USERS),username=(req.body.username||'').trim();if(!username||!req.body.password)return res.status(400).json({ok:false});if(a.some(x=>x.username===username))return res.status(409).json({ok:false,error:'exists'});a.push({id:Date.now(),username,password:hash(req.body.password),role:'employee',name:(req.body.name||'کارمند').trim()});write(USERS,a);res.json({ok:true})});
+app.post('/api/orders',upload.fields([{name:'altiumFiles',maxCount:15},{name:'imageFiles',maxCount:15}]),(req,res)=>{let a=read(DATA),tracking=code(),f=req.files||{};let o={id:Date.now(),tracking,createdAt:new Date().toISOString(),status:'در انتظار بررسی',customer:{name:req.body.name||'',company:req.body.company||'',phone:req.body.phone||'',email:req.body.email||''},project:{title:req.body.title||'',quantity:req.body.quantity||'',layers:req.body.layers||'',material:req.body.material||'FR-4',thickness:req.body.thickness||'',copper:req.body.copper||'',finish:req.body.finish||'',notes:req.body.notes||''},files:[...(f.altiumFiles||[]).map(x=>({name:x.originalname,file:x.filename,type:'altium'})),...(f.imageFiles||[]).map(x=>({name:x.originalname,file:x.filename,type:'image'}))],messages:[],price:null};a.unshift(o);write(DATA,a);res.json({ok:true,tracking})});
+app.get('/api/track/:code',(req,res)=>{let o=read(DATA).find(x=>x.tracking.toLowerCase()===req.params.code.toLowerCase());if(!o)return res.sendStatus(404);res.json({order:o})});
+app.post('/api/orders/:code/reply',upload.fields([{name:'extraFiles',maxCount:10}]),(req,res)=>{let a=read(DATA),o=a.find(x=>x.tracking.toLowerCase()===req.params.code.toLowerCase());if(!o)return res.sendStatus(404);let text=(req.body.text||'').trim();o.messages=o.messages||[];if(text)o.messages.push({id:Date.now(),from:'customer',name:o.customer.name||'مشتری',text,at:new Date().toISOString()});let f=((req.files&&req.files.extraFiles)||[]);f.forEach(x=>o.files.push({name:x.originalname,file:x.filename,type:'extra'}));if(text||f.length)o.status='اطلاعات تکمیلی دریافت شد';write(DATA,a);res.json({ok:true})});
+app.get('/api/admin/orders',auth,(req,res)=>res.json(read(DATA)));
+app.patch('/api/admin/orders/:id',auth,(req,res)=>{let a=read(DATA),o=a.find(x=>String(x.id)===req.params.id);if(!o)return res.sendStatus(404);if(req.body.status!==undefined)o.status=req.body.status;if(req.body.price!==undefined)o.price=req.body.price;write(DATA,a);res.json({ok:true})});
+app.post('/api/admin/orders/:id/message',auth,(req,res)=>{let a=read(DATA),o=a.find(x=>String(x.id)===req.params.id);if(!o)return res.sendStatus(404);let text=(req.body.text||'').trim();if(!text)return res.status(400).json({ok:false});o.messages=o.messages||[];o.messages.push({id:Date.now(),from:'admin',name:req.user.name||req.user.username,text,at:new Date().toISOString()});if(req.body.status)o.status=req.body.status;write(DATA,a);res.json({ok:true})});
+app.get('/api/admin/agent',auth,(req,res)=>{let a=read(DATA);res.json({total:a.length,new:a.filter(x=>x.status==='در انتظار بررسی').length,need:a.filter(x=>x.status.includes('تکمیل')).length,priced:a.filter(x=>x.price).length})});
+app.listen(PORT,'0.0.0.0',()=>console.log('IranBoard V4 on',PORT));
